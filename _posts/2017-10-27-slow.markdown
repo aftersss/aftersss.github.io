@@ -142,7 +142,7 @@ protected void writeContent(HttpServletResponse response, Resource resource) thr
 由于我是mac系统，我打开`活动监视器`观察了下，发现在请求js的瞬间，网络有个瞬间的高峰值，之后就平缓下来了，这表明chrome的限速工具只是模拟行为，并没有真正限速。
 
 又搜索了一番资料后，终于在苹果官网找到了一款好用的限速软件:`Network Link Conditioner`（这个软件集成在Additional_Tools_for_Xcode_9里。）
-打开它的限速功能后，请求js，终于在服务端找到了对应的超时日志，重现成功。
+打开它的限速功能后，请求js，终于在服务端找到了对应的超时日志，重现成功。(windows系统可以用360网速查看器等软件来限速，应该也可以，本人没测试过)
 
 由此看来，该问题确实和客户端网络慢有关系。
 
