@@ -1,0 +1,163 @@
+---
+layout: post
+title:  "记一次慢日志的排查过程"
+date:   2017-10-27 12:06:12 +0800
+categories: technical
+author: 黄文奇
+keywords: 慢日志, nginx, http, tcp, 缓冲
+description: 本文记录了一次较奇怪线上慢日志的排查过程
+---
+
+> 本文记录了一次较奇怪线上慢日志的排查过程，最终修正方法很简单，但排查过程着实费了不少功夫。
+
+# 问题暴露
+我们线上有个java tomcat应用（使用spring-boot框架搭建）打印了很多慢日志，典型的有两种：
+1.有个http请求只是简单地打印了一行logback日志，却经常耗时数秒，夸张的可以达到几十秒
+2.部分http请求是请求js等静态资源，却经常耗时数秒，夸张的可以达到几十秒。
+
+上述问题的特点都是偶现，我们在公司网络环境下试了好几次，没发现慢的情况，而且本地也无法重现。
+
+# 初步排查
+先来排查第一个问题，对打日志加了耗时监控（在日志打印前后各加一行代码计算时间差）后发现打印日志花的时间不超过1ms，由此看来时间基本花在tomcat和spring等的处理流程上了，
+然而tomcat、spring都是黑盒子，除了改源码，我们似乎没办法监控他们内部方法的耗时。由于问题是偶现的，我们又没法在本地重现，接下来该怎么排查下去呢？
+
+这个时候我想到了javaagent，通过javaagent可以在java main方法执行前得到执行机会，并在加载一个类之前修改该类的字节码。说干就干。
+javaagent编写的大概思路是：修改指定类的字节码，拦截相关方法调用，并计算耗时，如果耗时超过指定阈值，则打印日志到文件中。
+
+> 这个javaagent在排查一些偶发的慢请求时比较有用，后续考虑做一些改进后开放出来
+
+写好javaagent并验证通过后，通过修改应用的启动参数，我们配上了javaagent
+（考虑到性能因素，我只对org.springframework.web以及我们公司自己的package下的类进行了修改字节码操作）。
+过了不久，我想要的日志就出来了。
+
+这个是对于第一种慢请求的慢日志样本（其中o.s.w开头的表示spring中的类）：
+
+```
+10-27 11:10:44 [DP]method stacktrace containing the method is slow:`c.d.a.c.c.JustLogCtrl.justLog` cost:531ms
+        100%  531ms  c.c.d.w.t.MonitorRunnable.run
+        -100%  531ms  o.s.w.f.OncePerRequestFilter.doFilter
+        --100%  531ms  o.s.w.f.CharacterEncodingFilter.doFilterInternal
+        ---100%  531ms  c.c.d.b.e.a.w.c.Rfc2109CookieFixFilter.doFilter
+        ----100%  531ms  o.s.w.f.OncePerRequestFilter.doFilter
+        -----100%  531ms  o.s.w.f.HiddenHttpMethodFilter.doFilterInternal
+        ------100%  531ms  o.s.w.f.OncePerRequestFilter.doFilter
+        -------100%  531ms  o.s.w.f.HttpPutFormContentFilter.doFilterInternal
+        --------100%  531ms  o.s.w.f.OncePerRequestFilter.doFilter
+        ---------100%  531ms  o.s.w.f.RequestContextFilter.doFilterInternal
+        ----------100%  531ms  c.c.d.b.e.a.w.DBTimeProfileFilter.doFilter
+        -----------100%  531ms  c.c.d.b.e.a.c.CatAutoConfiguration$CatHttpFilterConfiguration$1.doFilter
+        ------------100%  531ms  c.c.d.b.e.a.w.ClientAbortExceptionIgnoreFilter.doFilter
+        -------------100%  531ms  c.d.a.c.f.CookieFilter.doFilter
+        --------------100%  531ms  c.c.d.b.e.a.a.AccessLogFilter.doFilter
+        ---------------100%  531ms  c.d.a.c.f.XssFilter.doFilter
+        ----------------100%  531ms  o.s.w.f.OncePerRequestFilter.doFilter
+        -----------------100%  531ms  o.s.w.s.r.ResourceUrlEncodingFilter.doFilterInternal
+        ------------------100%  531ms  o.s.w.s.FrameworkServlet.service
+        -------------------100%  531ms  o.s.w.s.FrameworkServlet.doPost
+        --------------------100%  531ms  o.s.w.s.FrameworkServlet.processRequest
+        ---------------------100%  531ms  o.s.w.s.DispatcherServlet.doService
+        ----------------------100%  531ms  o.s.w.s.DispatcherServlet.doDispatch
+        -----------------------100%  531ms  o.s.w.s.m.m.AbstractHandlerMethodAdapter.handle
+        ------------------------100%  531ms  o.s.w.s.m.m.a.RequestMappingHandlerAdapter.handleInternal
+        -------------------------100%  531ms  o.s.w.s.m.m.a.RequestMappingHandlerAdapter.invokeHandlerMethod
+        --------------------------99%  530ms  o.s.w.s.m.m.a.ServletInvocableHandlerMethod.invokeAndHandle
+        ---------------------------99%  529ms  o.s.w.m.s.InvocableHandlerMethod.invokeForRequest
+        ----------------------------99%  529ms  o.s.w.m.s.InvocableHandlerMethod.getMethodArgumentValues
+        -----------------------------99%  529ms  o.s.w.m.s.HandlerMethodArgumentResolverComposite.resolveArgument
+        ------------------------------99%  529ms  o.s.w.s.m.m.a.RequestResponseBodyMethodProcessor.resolveArgument
+        -------------------------------99%  529ms  o.s.w.s.m.m.a.RequestResponseBodyMethodProcessor.readWithMessageConverters
+        --------------------------------99%  529ms  o.s.w.s.m.m.a.AbstractMessageConverterMethodArgumentResolver.readWithMessageConverters
+```
+
+
+这个是对于第二种慢请求的慢日志样本：
+
+```
+10-27 11:10:51 [DP]method stacktrace containing the method is slow:`o.s.w.s.r.ResourceHttpRequestHandler.getResource` cost:574ms
+        100%  574ms  c.c.d.w.t.MonitorRunnable.run
+        -100%  574ms  o.s.w.f.OncePerRequestFilter.doFilter
+        --100%  574ms  o.s.w.f.CharacterEncodingFilter.doFilterInternal
+        ---100%  574ms  c.c.d.b.e.a.w.c.Rfc2109CookieFixFilter.doFilter
+        ----100%  574ms  o.s.w.f.OncePerRequestFilter.doFilter
+        -----100%  574ms  o.s.w.f.HiddenHttpMethodFilter.doFilterInternal
+        ------100%  574ms  o.s.w.f.OncePerRequestFilter.doFilter
+        -------100%  574ms  o.s.w.f.HttpPutFormContentFilter.doFilterInternal
+        --------100%  574ms  o.s.w.f.OncePerRequestFilter.doFilter
+        ---------100%  574ms  o.s.w.f.RequestContextFilter.doFilterInternal
+        ----------100%  574ms  c.c.d.b.e.a.w.DBTimeProfileFilter.doFilter
+        -----------100%  574ms  c.c.d.b.e.a.c.CatAutoConfiguration$CatHttpFilterConfiguration$1.doFilter
+        ------------100%  574ms  c.c.d.b.e.a.w.ClientAbortExceptionIgnoreFilter.doFilter
+        -------------99%  573ms  c.d.a.c.f.CookieFilter.doFilter
+        --------------99%  573ms  c.c.d.b.e.a.a.AccessLogFilter.doFilter
+        ---------------99%  573ms  c.d.a.c.f.XssFilter.doFilter
+        ----------------99%  573ms  o.s.w.f.OncePerRequestFilter.doFilter
+        -----------------99%  573ms  o.s.w.s.r.ResourceUrlEncodingFilter.doFilterInternal
+        ------------------99%  573ms  o.s.w.s.FrameworkServlet.service
+        -------------------99%  573ms  o.s.w.s.FrameworkServlet.doGet
+        --------------------99%  573ms  o.s.w.s.FrameworkServlet.processRequest
+        ---------------------99%  573ms  o.s.w.s.DispatcherServlet.doService
+        ----------------------99%  573ms  o.s.w.s.DispatcherServlet.doDispatch
+        -----------------------95%  551ms  o.s.w.s.m.HttpRequestHandlerAdapter.handle
+        ------------------------95%  551ms  o.s.w.s.r.ResourceHttpRequestHandler.handleRequest
+        -------------------------95%  551ms  o.s.w.s.r.ResourceHttpRequestHandler.writeContent
+```
+
+先来看第一个慢日志样本，主要慢在：o.s.w.s.m.m.a.AbstractMessageConverterMethodArgumentResolver.readWithMessageConverters这个方法上，方法比较长，这里不贴了，
+方法内部逻辑比较简单，读取http request body的数据并绑定到springMvc Controller方法中注解了@RequestBody的参数上，这么看来是慢在网络传输上。
+
+再来看第二个慢日志样本，主要慢在：o.s.w.s.r.ResourceHttpRequestHandler.writeContent这个方法上：
+
+```
+protected void writeContent(HttpServletResponse response, Resource resource) throws IOException {
+    try {
+        InputStream in = resource.getInputStream();
+        try {
+            StreamUtils.copy(in, response.getOutputStream());
+        }
+        catch (NullPointerException ex) {
+            // ignore, see SPR-13620
+        }
+        finally {
+            try {
+                in.close();
+            }
+            catch (Throwable ex) {
+                // ignore, see SPR-12999
+            }
+        }
+    }
+    catch (FileNotFoundException ex) {
+        // ignore, see SPR-12999
+    }
+}
+```
+
+上述代码就是简单地拿到js文件，并输出到response中，应该也是慢在网络传输上。
+
+于是我找运维看了下负载均衡的配置（我们使用的是阿里云SLB），是按量付费的。而且这个java应用是一个后台系统，请求量不大，从监控来看服务端网络也不是瓶颈。
+
+那么问题有没有可能出现在客户端网络上呢？
+
+于是我使用了Chrome开发者工具的限速功能来进行测试，打开js，从本地来看确实很慢，但是服务端没有报错日志，
+由于我是mac系统，我打开`活动监视器`观察了下，发现在请求js的瞬间，网络有个瞬间的高峰值，之后就平缓下来了，这表明chrome的限速工具只是模拟行为，并没有真正限速。
+
+又搜索了一番资料后，终于在苹果官网找到了一款好用的限速软件:`Network Link Conditioner`（这个软件集成在Additional_Tools_for_Xcode_9里。）
+打开它的限速功能后，请求js，终于在服务端找到了对应的超时日志，重现成功。
+
+由此看来，该问题确实和客户端网络慢有关系。
+
+但是问题来了，如果是客户端网络慢导致的，为什么我们的其他系统没有出现过这类慢日志呢？
+
+于是我开始找其他应用进行对比分析，发现其他使用相同spring-boot/tomcat版本的应用都没有此问题，可以排除依赖的版本问题。
+
+排查过程中，在一次偶然测试到我们预发环境的同一个应用时，我发现服务端竟然没有打印慢日志，对比了下，我发现两套环境主要的不同点是：预发环境的请求经过了nginx反向代理，而线上走的是阿里云SLB代理，
+会不会跟nginx有关系呢？ 我试着绕过预发环境的nginx，直接访问java应用暴露的tomcat端口，慢日志再次出现，看来确实和nginx有关系。
+于是找运维看了下线上SLB的配置，转发走的是TCP协议，立马让运维新建了个SLB，使用HTTP协议转发（阿里云SLB使用http协议时，流量会先经过LVS，然后经过阿里云的nginx，然后才到我们服务器），绑定hosts后测试，慢日志消失了。问题解决！
+
+那么为什么经过nginx的代理，慢日志问题就不会出现了呢？
+要了解这个问题，你先得了解TCP协议的通信过程，简单来说，TCP协议是有序的（HTTP协议在TCP协议之上），当服务端响应一个tcp报文后，客户端需要响应一个ACK报文表示你发的包我已经收到，然后服务器才能继续发送下一个报文。
+当使用了TCP协议的SLB时，上述报文在网络上的一来一回显然要花费不少时间，尤其在客户端网络慢的情况下。tomcat线程大部分时间都阻塞在了socket IO上。（这里只是简单解释了下请求慢是如何发生的，tcp协议的通信过程远比这里描述的复杂，有兴趣的可以自行搜索。）
+而nginx有缓冲区的概念，当tomcat响应结果时，nginx会把响应结果保存到缓冲区中，并响应ACK报文，让tomcat尽快把所有报文都返回，然后把结果转发给客户端；从tomcat的角度来看，响应已经成功传输出去，我的线程可以干其他事情了，而从客户端的角度来看，该慢还是会慢（这时客户端到nginx的网络成为瓶颈）。nginx作为一个中间人，可以帮助尽快释放tomcat线程，让tomcat有机会做更多事情。
+（对应地，nginx也会对客户端的请求进行缓冲）
+
+
