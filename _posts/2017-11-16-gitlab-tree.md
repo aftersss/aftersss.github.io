@@ -27,7 +27,8 @@ description: gitlab-10代码树插件for chrome发布
 # 使用方法
 1. 打开gitlab网页
 2. 如果是第一次打开gitlab网页，插件会检测到并弹出一个确认框，请仔细阅读后点击确认（这个步骤只有首次需要）
-3. 导航到一个具体的项目页面中，你会在左上角看到一个箭头，点击展开即可看到代码树。
+3. 导航到一个具体的项目页面中，你会在左上角看到一个箭头，点击展开即可看到代码树,如下所示：
+<img src="https://github.com/aftersss/gitlab-tree/raw/master/docs/gitlab-tree.png"/>
 
 # 其他说明
 1. 本插件只针对gitlab 10。
